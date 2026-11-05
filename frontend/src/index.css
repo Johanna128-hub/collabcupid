@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  /* Primary brand scale now tracks the violet→pink gradient used across
+     the mockups (topbar, primary buttons, active states), instead of the
+     old pure-pink scale. */
+  --color-brand-50: #faf5ff;
+  --color-brand-100: #f3e8ff;
+  --color-brand-200: #e9d5ff;
+  --color-brand-300: #d8b4fe;
+  --color-brand-400: #c084fc;
+  --color-brand-500: #9333ea;
+  --color-brand-600: #7c3aed;
+  --color-brand-700: #6d28d9;
+  --color-brand-800: #581c87;
+  --color-brand-900: #4c1d95;
+
+  /* Pink end of the gradient, used for badges / accents that pair with brand. */
+  --color-accent-50: #fdf2f8;
+  --color-accent-100: #fce7f3;
+  --color-accent-200: #fbcfe8;
+  --color-accent-300: #f9a8d4;
+  --color-accent-400: #f472b6;
+  --color-accent-500: #ec4899;
+  --color-accent-600: #db2777;
+  --color-accent-700: #be185d;
+  --color-accent-800: #9d174d;
+  --color-accent-900: #831843;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background-color: #f6f5fa;
+  color: #22202b;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #e5d3df;
+  border-radius: 8px;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Shared gradient utilities so every screen (topbar, primary buttons,
+   outgoing chat bubbles, hero panels) uses the exact same two stops. */
+.cc-gradient-bg {
+  background-image: linear-gradient(90deg, #6d28d9 0%, #db2777 100%);
+}
+.cc-gradient-bg-diag {
+  background-image: linear-gradient(145deg, #6d28d9 0%, #db2777 100%);
+}
+.cc-gradient-btn {
+  background-image: linear-gradient(90deg, #db2777, #9333ea);
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}

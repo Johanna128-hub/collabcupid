@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Firebase Storage rules for CollabCupid's repository file bytes
+// (projects/{projectId}/repoFiles/... metadata lives in Firestore; the
+// actual file contents live here under repositories/{projectId}/...).
+//
+// Storage rules can read Firestore documents via firestore.get(), which we
+// use to mirror the same "project members only" check that
+// firestore.rules applies to the repoFiles/versions subcollections -- see
+// that file for the full access-model writeup and its documented trust
+// boundaries.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isProjectMember(projectId) {
+      return isSignedIn() && request.auth.uid in
+        firestore.get(/databases/(default)/documents/projects/$(projectId)).data.memberIds;
+    }
+
+    match /repositories/{projectId}/{allPaths=**} {
+      allow read, write: if isProjectMember(projectId);
+    }
+
+    // Anything else (there's nothing else in this app today) is denied by
+    // default -- Storage rules are deny-by-default outside matched paths.
+  }
+}

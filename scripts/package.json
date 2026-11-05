@@ -1,0 +1,13 @@
+{
+  "name": "collabcupid-scripts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "One-off admin scripts for local development -- not part of the deployed app.",
+  "scripts": {
+    "seed": "node seed-emulator.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

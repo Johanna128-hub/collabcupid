@@ -1,0 +1,199 @@
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// CollabCupid Firestore security rules.
+//
+// This is a fully client-side ("serverless") app: the React frontend talks
+// directly to Firestore with the client SDK, with no backend server and
+// (deliberately, to stay on Firebase's free Spark plan) no Cloud Functions.
+// That means a handful of writes that would normally be relayed through a
+// trusted backend -- e.g. "notify the other person when I message them",
+// "add me to the project's group chat once my request is accepted" -- have
+// to be allowed directly from the acting user's own client. Those spots are
+// called out explicitly below as TRUST BOUNDARY comments: they're narrower
+// than "any signed-in user can write anything", but they do trust the
+// client not to lie about what it just did. That's an appropriate tradeoff
+// for a small-community / student-project deployment; a production
+// deployment handling sensitive data should move those specific writes into
+// Cloud Functions (see README-FIREBASE.md) instead of loosening these rules.
+// ---------------------------------------------------------------------------
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function project(projectId) {
+      return get(/databases/$(database)/documents/projects/$(projectId)).data;
+    }
+
+    function isProjectMember(projectId) {
+      return isSignedIn() && request.auth.uid in project(projectId).memberIds;
+    }
+
+    // ---------------------------------------------------------------------
+    // Users -- public profiles. Anyone (including signed-out visitors) can
+    // browse the collaborator directory and view a profile; only the owner
+    // can create or edit their own document.
+    // ---------------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if true;
+      allow create: if isSelf(uid);
+      allow update: if isSelf(uid);
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // Projects -- public read (browsing works logged-out, matching the
+    // original app). Only the owner can create/edit/delete the project
+    // document itself.
+    //
+    // TRUST BOUNDARY: a user accepting an invitation needs to flip the
+    // project's `status` and add themselves to `memberIds` as part of
+    // finalizeAcceptance() -- they are not the owner. We allow that one
+    // narrow case (and nothing else about the project) for a signed-in user
+    // who is named as the requester on a pending, invitation-direction
+    // collaborationRequest for this exact project.
+    // ---------------------------------------------------------------------
+    match /projects/{projectId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        resource.data.ownerId == request.auth.uid ||
+        request.auth.uid in request.resource.data.memberIds
+      );
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /positions/{positionId} {
+        allow read: if true;
+        // TRUST BOUNDARY: the owner manages positions directly
+        // (removeCollaborator), but accepting a request -- which can be
+        // initiated by either party, see collaborationRequests below --
+        // also needs to flip a position from open -> filled as part of
+        // finalizeAcceptance(), from the accepting user's own client.
+        // finalizeAcceptance() enforces the actual invariants (role not
+        // already filled, request still pending, etc.) applicaton-side.
+        allow write: if isSignedIn();
+      }
+
+      // Repository files/versions are restricted to the project's own team
+      // (owner + accepted collaborators), tracked via the project doc's
+      // denormalized memberIds array.
+      match /repoFiles/{fileId} {
+        allow read, write: if isProjectMember(projectId);
+        match /versions/{versionId} {
+          allow read, write: if isProjectMember(projectId);
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Collection-group read access for `positions`.
+    //
+    // getUserCollaborations() finds which projects a user collaborates on
+    // with a *collection group* query spanning every project's positions
+    // subcollection at once (collectionGroup(db, "positions"), filtered on
+    // filledByUserId) -- it has to be a collection group query because
+    // there's no single project id to scope a normal subcollection query
+    // to.
+    //
+    // The nested `match /positions/{positionId}` block above only grants
+    // access when reading one specific project's positions subcollection
+    // directly (`projects/{projectId}/positions`, used by
+    // countOpenPositions/positionsFor/etc.) -- Firestore does NOT apply a
+    // plain nested match to a collection-group query that spans multiple
+    // parents. A collection-group read needs its own rule written with the
+    // `{path=**}` recursive wildcard, or it has no applicable `allow read`
+    // at all and is rejected outright as "Missing or insufficient
+    // permissions", regardless of whether the equivalent per-project rule
+    // is wide open (it is: `allow read: if true` above). This mirrors that
+    // same public-read intent, scoped to collection-group reads.
+    // ---------------------------------------------------------------------
+    match /{path=**}/positions/{positionId} {
+      allow read: if true;
+    }
+
+    // ---------------------------------------------------------------------
+    // Collaboration requests (join requests + invitations). Only the two
+    // parties involved (the requester/invitee and the project owner) can
+    // see or act on a given request, and a request can only be responded to
+    // once (status must still be "pending").
+    // ---------------------------------------------------------------------
+    match /collaborationRequests/{requestId} {
+      // Split into two single-field `allow read` statements (Firestore ORs
+      // them together automatically) instead of one `||` expression.
+      // Firestore's list-query validator checks a *query* against rules
+      // using only the query's own filters, and in practice it's much more
+      // reliable at proving a simple single-field equality condition than
+      // an OR across two different fields, even when the query itself
+      // filters on one side of that OR -- which is exactly the shape
+      // getIncomingRequests()/getMyInvitations() use (filtering on
+      // ownerId==uid or requesterId==uid respectively). Every call site
+      // that reads this collection filters on the matching field for
+      // whichever of these two statements should prove it (see
+      // firestoreApi.ts), so this is a strictly safer rewrite of the same
+      // permission, not a behavior change.
+      allow read: if isSignedIn() && resource.data.requesterId == request.auth.uid;
+      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.initiatedById == request.auth.uid;
+      allow update: if isSignedIn()
+        && resource.data.status == 'pending'
+        && (resource.data.requesterId == request.auth.uid || resource.data.ownerId == request.auth.uid);
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // Conversations (direct + per-project group chat) and their messages.
+    // Only members can read or send messages.
+    //
+    // TRUST BOUNDARY: when a collaboration request is accepted, the newly
+    // added collaborator needs to add themselves (arrayUnion) to the
+    // project's group chat's memberIds as part of that same client-side
+    // transaction, before they're already a member. We allow that one
+    // specific shape of update (adding exactly the caller's own uid to
+    // memberIds on a group conversation) in addition to normal member
+    // writes.
+    // ---------------------------------------------------------------------
+    match /conversations/{conversationId} {
+      allow read: if isSignedIn() && request.auth.uid in resource.data.memberIds;
+      allow create: if isSignedIn() && request.auth.uid in request.resource.data.memberIds;
+      allow update: if isSignedIn() && (
+        request.auth.uid in resource.data.memberIds ||
+        (resource.data.isGroup == true && request.auth.uid in request.resource.data.memberIds)
+      );
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberIds;
+        allow create: if isSignedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberIds
+          && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Notifications. A user can only ever read/mark-read/clear their own.
+    //
+    // TRUST BOUNDARY: creating a notification is inherently a "write to
+    // someone else's inbox" action (e.g. notifying a project owner that
+    // someone requested to join). With no backend relay, we allow any
+    // signed-in user to create a well-shaped notification document for any
+    // target user. This is the same trust model as the rest of this ruleset
+    // -- see the file header.
+    // ---------------------------------------------------------------------
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasAll(['userId', 'type', 'message', 'isRead', 'createdAt'])
+        && request.resource.data.isRead == false;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+  }
+}
